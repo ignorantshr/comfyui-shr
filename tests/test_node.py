@@ -30,7 +30,7 @@ class NodeTests(unittest.TestCase):
 
     def test_extension_and_schema(self):
         extension = asyncio.run(self.plugin.comfy_entrypoint())
-        self.assertEqual(asyncio.run(extension.get_node_list()), [self.node])
+        self.assertEqual(asyncio.run(extension.get_node_list()), [self.node, self.plugin.SHRBatchImages, self.plugin.SHRShowValues])
         schema = self.node.define_schema()
         self.assertEqual(schema.node_id, "SHRQwenImage21Resizer")
         self.assertEqual(len(schema.outputs), 4)
@@ -42,6 +42,87 @@ class NodeTests(unittest.TestCase):
         result, w, h, r = self.run_node(image)
         self.assertIs(result, image)
         self.assertEqual((w, h, r), (64, 64, 64))
+
+    def test_show_values_keeps_lists_separate_and_returns_text(self):
+        node = self.plugin.SHRShowValues
+        self.assertIn("values", node.INPUT_TYPES()["required"])
+        self.assertTrue(node.INPUT_IS_LIST)
+        self.assertTrue(node.OUTPUT_NODE)
+        self.assertEqual(node.RETURN_TYPES, ["STRING"])
+        values = {"value3": [1, 1], "value1": [512, 768], "value2": [512, 1024]}
+        output = node.execute(values, ["width\nheight\nbatch_size"])
+        expected = "width: [512, 768]\nheight: [512, 1024]\nbatch_size: [1, 1]"
+        self.assertEqual(output.result, (expected,))
+        self.assertEqual(output.ui.as_dict(), {"text": (expected,)})
+        self.assertEqual(values["value1"], [512, 768])
+
+    def test_show_values_order_validation_and_bounded_tensor_summary(self):
+        node = self.plugin.SHRShowValues
+        tensor = self.torch.empty(1, 10, 20, 3, device="meta")
+        values = {"value10": [tensor], "value2": [None], "value1": [True]}
+        text, = node.execute(values, [""]).result
+        self.assertTrue(text.startswith("value1: True\nvalue2: None\nvalue10: Tensor(shape=(1, 10, 20, 3)"))
+        self.assertIn("device=meta", text)
+        text, = node.execute({"value1": ["x" * 10000]}, [""]).result
+        self.assertLess(len(text), 600)
+        for values, labels in (([], [""]), ({"bad": []}, [""]),
+                               ({"value1": 1}, [""]), ({}, []), ({}, [1])):
+            with self.assertRaises(ValueError):
+                node.execute(values, labels)
+
+    def test_image_list_preserves_mixed_images_and_order(self):
+        node = self.plugin.SHRBatchImages
+        schema = node.define_schema()
+        self.assertTrue(schema.is_input_list)
+        self.assertTrue(schema.outputs[0].is_output_list)
+        self.assertIn("images", node.INPUT_TYPES()["required"])
+        template = schema.inputs[0].template
+        self.assertEqual(template.min, 1)
+        self.assertEqual(template.names, [f"image{i}" for i in range(1, 101)])
+        self.assertTrue(node.INPUT_IS_LIST)
+        self.assertEqual(node.OUTPUT_IS_LIST, [True])
+        first = self.torch.rand(2, 8, 12, 3)
+        second = self.torch.rand(3, 9, 7, 4, dtype=self.torch.float64)
+        originals = first.clone(), second.clone()
+        result, = node.execute({"image1": [first], "image2": [second]}).result
+        self.assertEqual(len(result), 5)
+        for actual, expected in zip(result, [*first.split(1), *second.split(1)]):
+            self.assertEqual(actual.shape, expected.shape)
+            self.assertEqual(actual.dtype, expected.dtype)
+            self.assertEqual(actual.device, expected.device)
+            self.assertTrue(self.torch.equal(actual, expected))
+        self.assertTrue(self.torch.equal(first, originals[0]))
+        self.assertTrue(self.torch.equal(second, originals[1]))
+        # A previous list output can be connected without duplicating images.
+        chained, = node.execute({"image1": result, "image2": [first]}).result
+        self.assertEqual(len(chained), 7)
+        for actual, expected in zip(chained[:5], result):
+            self.assertTrue(self.torch.equal(actual, expected))
+        self.assertEqual(node.execute({"image1": [], "image2": []}).result, ([],))
+
+    def test_image_list_dynamic_inputs_follow_numeric_order(self):
+        node = self.plugin.SHRBatchImages
+        inputs = {f"image{i}": [self.torch.full((1, i, 2, 3), float(i))]
+                  for i in (10, 3, 1, 100, 2)}
+        result, = node.execute(inputs).result
+        self.assertEqual([image.shape[1] for image in result], [1, 2, 3, 10, 100])
+        for image, index in zip(result, (1, 2, 3, 10, 100)):
+            self.assertTrue(self.torch.equal(image, inputs[f"image{index}"][0]))
+        for invalid in ([], {"image101": []}, {"other": []}):
+            with self.assertRaises(ValueError):
+                node.execute(invalid)
+
+    def test_image_list_rejects_invalid_images(self):
+        first = self.torch.zeros(1, 8, 12, 3)
+        invalid = [None, self.torch.zeros(8, 12, 3),
+                   self.torch.zeros(0, 8, 12, 3), self.torch.zeros(1, 8, 12, 1),
+                   first.int()]
+        for other in invalid:
+            for inputs in (([first], [other]), ([other], [first])):
+                with self.assertRaises(ValueError):
+                    self.plugin.SHRBatchImages.execute(dict(zip(("image1", "image2"), inputs)))
+        with self.assertRaises(ValueError):
+            self.plugin.SHRBatchImages.execute({"image1": first})
 
     def test_crop_uses_native_geometry_and_preserves_batch(self):
         import comfy.utils

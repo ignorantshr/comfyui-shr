@@ -1,12 +1,15 @@
 # comfyui-shr
 
-SHR 的 ComfyUI 自定义节点包，使用原生 V3 节点 API。当前包含 **Qwen Image 2.1 Resizer**，为 Qwen 图像编辑准备尺寸稳定的画布，缩放复用 `comfy.utils.common_upscale`。
+SHR 的 ComfyUI 自定义节点包，使用原生 V3 节点 API。包含 **Qwen Image 2.1 Resizer**（为 Qwen 图像编辑准备尺寸稳定的画布，缩放复用 `comfy.utils.common_upscale`）和 **Image List (No Resize)**（原样组合不同尺寸的图片列表）。
 
 ## 节点与目录
 
 ```text
 comfyui-shr/
 ├── __init__.py          # 节点包入口，统一注册节点
+├── batch_images/
+│   ├── __init__.py
+│   └── node.py          # 不做图像处理的图片列表节点
 ├── resizer/
 │   ├── __init__.py
 │   ├── node.py          # Qwen Image 2.1 Resizer 节点定义
@@ -33,6 +36,34 @@ ln -s /Users/haoran.shi/projects/mine/comfyui-shr "$COMFYUI_DIR/custom_nodes/com
 ```
 
 ## 工作流接法
+
+### SHR Show Values
+
+重启 ComfyUI 并刷新页面，搜索 **SHR Show Values**（`SHR/utils`）。连接一个输入后自动增加下一个输入口，最多 100 路，支持任意类型。每路独立显示，保留列表分组，不会把宽高列表混在一起或重复补齐。
+
+把 `width`、`height`、`batch_size` 分别接到 `value1`、`value2`、`value3`。在 `labels` 中按行填写这三个名称；留空则显示默认输入名。输出示例：
+
+```text
+width: [512, 768]
+height: [512, 1024]
+batch_size: [1, 1]
+```
+
+节点内的只读文本框显示结果，`text` 输出口也会真正返回同一份 STRING，可连接下游节点。单值直接显示；张量仅显示形状、数据类型和设备，不读取像素。长字符串、长列表和深层结构会截断用于预览。
+
+本节点需要支持 V3 Autogrow 的 ComfyUI 版本，前端显示由本插件的 `web/show_values.js` 提供，无需 Easy Use。
+
+### Image List (No Resize)
+
+重启 ComfyUI 后搜索 **Image List (No Resize)**，分类为 `SHR/image`，节点 ID 为 `SHRBatchImages`。
+
+输入口使用 ComfyUI 原生 Autogrow：连接图片后自动出现下一个输入口（`image1`、`image2`、`image3`…），最多 100 个，至少连接一个。输出 ComfyUI 原生 IMAGE 列表，按输入编号顺序依次收集所有图片。输入可以是单张图、批次或上游图片列表；批次会拆成单张 IMAGE（形状为 `[1, H, W, C]`）。支持不同尺寸、RGB / RGBA，不缩放、裁切、补边、转换数据类型或修改像素。
+
+普通下游节点由 ComfyUI 逐项执行；支持列表输入的节点可一次接收整个列表。可串接本节点继续添加图片，不会按两个列表的长度配对或重复图片。下游节点自身仍可能调整尺寸；本节点只保证输出时保留原图。
+
+节点 ID 仍为 `SHRBatchImages`。本次输入结构改为动态输入组；旧工作流中的固定双输入节点建议删除后重新添加并连接。需要支持 V3 Autogrow 的 ComfyUI 后端与前端。
+
+### Qwen Image 2.1 Resizer
 
 ```text
 Load Image → Resizer.image → TextEncodeQwenImage21.image_1
